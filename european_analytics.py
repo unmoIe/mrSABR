@@ -3,30 +3,30 @@ import numpy as np
 from scipy.stats import norm
 
 class EuropeanAnalyticsSABR:
-    from scipy.optimize import brentq
 
-    def __init__(self, F0, T, beta, nu, rho, sigma_atm, lambda_):
-        self.F0 = F0
+    def __init__(self, F_s, T, beta, nu, rho, sigma_atm, lambda_):
         self.T = T
         self.beta = beta
         self.nu = nu
         self.rho = rho
         self.sigma_atm = sigma_atm
         self.lambda_ = lambda_
-        self.F_s = F0 + lambda_
+        self.F_s = F_s
         
-        # Solve for alpha such that hagan_implied_vol(F0) == sigma_atm
+        atm_price = self.bachelier_price(self.F_s, self.F_s, self.T, self.sigma_atm)
+        self.sigma_ln_atm = self.bs_implied_vol(atm_price, self.F_s, self.F_s, self.T)
+
+        # Solve for alpha such that hagan_implied_vol(F_s) == sigma_ln_atm
         def objective(alpha_trial):
             self.alpha = alpha_trial
-            return self.hagan_implied_vol(F0) - sigma_atm
+            return self.hagan_implied_vol(F_s) - self.sigma_ln_atm
         
         # Just using a fixed upper bound
         upper = 10.0
         self.alpha = brentq(objective, 1e-8, upper, xtol=1e-12)
 
 
-    def hagan_implied_vol(self, K):
-        K_s = K + self.lambda_
+    def hagan_implied_vol(self, K_s):
         F_s = self.F_s
         alpha = self.alpha
         beta = self.beta
@@ -39,8 +39,8 @@ class EuropeanAnalyticsSABR:
             correction = (1-beta)**2 * alpha**2 / (24 * F_s**(2-2*beta)) + rho*beta*nu*alpha / (4 * F_s**(1-beta)) + (2 - 3*rho**2)/24 * nu**2
             sigma_B = (alpha / F_s**(1-beta)) * (1 + correction * T)
             return sigma_B
-        
-        #General case when 
+
+        # General case
         FK_beta2 = (F_s * K_s) ** ((1.0 - beta) / 2.0)
         log_FK = np.log(F_s / K_s)
 
@@ -54,15 +54,21 @@ class EuropeanAnalyticsSABR:
         sigma_B = (alpha / (FK_beta2 * denom)) * (z / x_z) * (1 + correction * T)
         return sigma_B
     
-    def implied_vol_smile(self, strikes):
-        return np.array([self.hagan_implied_vol(K) for K in strikes])
+    def implied_vol_smile(self, strikes_s):
+        return np.array([self.hagan_implied_vol(K_s) for K_s in strikes_s])
 
-    def implied_vol_smile_mc(self, F_s_T, strikes):
-        return np.array([self.bs_implied_vol(
-            np.mean(np.maximum(F_s_T - (K + self.lambda_), 0)),
-            self.F_s, 
-            K + self.lambda_, 
-            self.T) for K in strikes])
+    def implied_vol_smile_mc(self, F_s_T, strikes_s):
+        F_bar = F_s_T.mean()
+        vols = []
+        for K_s in strikes_s:
+            if K_s < F_bar:
+                price = np.mean(np.maximum(K_s - F_s_T, 0.0))
+                v = self.bs_implied_vol(price, F_bar, K_s, self.T, option_type="put")
+            else:
+                price = np.mean(np.maximum(F_s_T - K_s, 0.0))
+                v = self.bs_implied_vol(price, F_bar, K_s, self.T, option_type="call")
+            vols.append(v)
+        return np.array(vols)
 
     @staticmethod
     def black_scholes_price(F, K, T, sigma, r=0, option_type="call"):
@@ -119,9 +125,8 @@ class EuropeanAnalyticsSABR:
         except ValueError:
             return np.nan
 
-    def price(self, K, r=0, option_type="call"):
-        sigma_B = self.hagan_implied_vol(K)
-        K_s = K + self.lambda_
+    def price(self, K_s, r=0, option_type="call"):
+        sigma_B = self.hagan_implied_vol(K_s)
         return self.black_scholes_price(self.F_s, K_s, self.T, sigma_B, r, option_type)
     
     @staticmethod
