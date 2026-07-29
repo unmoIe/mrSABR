@@ -1,6 +1,8 @@
 from scipy.optimize import brentq
+from scipy.integrate import quad
 import numpy as np
 from scipy.stats import norm
+
 
 class EuropeanAnalyticsSABR:
 
@@ -147,3 +149,52 @@ class EuropeanAnalyticsSABR:
             "ci_low":   price - 1.96 * stderr,
             "ci_high":  price + 1.96 * stderr,
         }
+    
+class EuropeanAnalyticsMRSABR(EuropeanAnalyticsSABR):
+    """Mean-reverting SABR analytics"""
+
+    @staticmethod
+    def _c_coeff(x, rho):
+        if x < 1e-8:
+            return 1.0
+        ex  = np.exp(-x)
+        e2x = np.exp(-2.0 * x)
+        term1 = (1.0 - rho**2) * ((1.0 - ex) / x)**2
+        term2 = 6.0 * rho**2 * (1.0 - (1.0 + x) * ex) / x**2 * (1.0 - ex) / x
+        term3 = 4.0 * rho**2 * ((1.0 - x) * ex - e2x) / x**2
+        return term1 + term2 + term3
+
+    @staticmethod
+    def mr_effective_params(kappa, T, nu, rho):
+        """Effective SABR parameters from the paper
+        b_bar is obtained analytically
+        c_bar is obtained numerically
+        Then: nu_eff = sqrt(c_bar), rho_eff = b_bar / sqrt(c_bar).
+        """
+        x = kappa * T
+        if x < 1e-8:
+            return nu, rho
+
+        b_bar = 2.0 * rho * nu / x**2 * (x - 1.0 + np.exp(-x))
+
+        def integrand(t):
+            if t < 1e-12:
+                return 0.0
+            xt = kappa * t
+            return t**2 * EuropeanAnalyticsMRSABR._c_coeff(xt, rho)
+
+        c_bar = 3.0 * nu**2 / T**3 * quad(integrand, 0, T, limit=100)[0]
+
+        if c_bar <= 0:
+            return 1e-6, 0.0
+
+        nu_eff  = np.sqrt(c_bar)
+        rho_eff = float(np.clip(b_bar / nu_eff, -0.999, 0.999))
+        return nu_eff, rho_eff
+
+    def __init__(self, F_s, T, beta, nu, rho, sigma_atm, lambda_, kappa):
+        self.kappa   = kappa
+        self.nu_raw  = nu
+        self.rho_raw = rho
+        self.nu_eff, self.rho_eff = self.mr_effective_params(kappa, T, nu, rho)
+        super().__init__(F_s, T, beta, self.nu_eff, self.rho_eff, sigma_atm, lambda_)
