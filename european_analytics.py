@@ -152,7 +152,52 @@ class EuropeanAnalyticsSABR:
     
 class EuropeanAnalyticsMRSABR(EuropeanAnalyticsSABR):
     """Mean-reverting SABR analytics"""
+    
+    @staticmethod
+    def mr_effective_params_mm(kappa, T, nu, rho):
+        """Effective SABR parameters via MOMENT MATCHING.
+        Returns (nu_eff, rho_eff).
+        """
+        x = kappa * T
+        if x < 1e-8:
+            return nu, rho
 
+        # skewness of S(T)
+        s = 6.0 * nu * rho * np.sqrt(T) / x**2 * (x - 1.0 + np.exp(-x))
+
+        # O(nu^2) coefficient of E[S^2 sigma]/alpha^2 (minus its O(1) part t):
+        def _q(t):
+            e1 = np.exp(-kappa * t)
+            q0 = (t / (2.0 * kappa)
+                - (1.0 - e1) / (2.0 * kappa**2)
+                + 5.0 * (1.0 - e1)**2 / (4.0 * kappa**2))
+            q1 = 4.0 * (1.0 - e1) / kappa**2 - 4.0 * t * e1 / kappa
+            return q0 + rho**2 * q1
+
+        # forcing term of the hat-R ODE:  hatR' + 2 kappa hatR = Sigma(t)
+        def _Sigma(t):
+            e1 = np.exp(-kappa * t)
+            e2 = np.exp(-2.0 * kappa * t)
+            mu4 = 3.0 * (1.0 - e2) / kappa
+            return mu4 + 2.0 * kappa * _q(t) + t + 12.0 * rho**2 / kappa * (1.0 - e1)
+
+        # I = int_0^T hatR(t) dt, closed 1-D form after swapping the double integral
+        I = quad(lambda tau: _Sigma(tau) * (1.0 - np.exp(-2.0 * kappa * (T - tau))),
+                0.0, T, limit=100)[0] / (2.0 * kappa)
+
+        # O(nu^2) variance coefficient  hat_p(T) = E[S^2]/alpha^2 - T
+        p_hat_T = (T - (1.0 - np.exp(-2.0 * kappa * T)) / (2.0 * kappa)) / (2.0 * kappa)
+
+        k_ex = 6.0 * nu**2 / T * (I / T - p_hat_T)
+
+        nu2T = 0.25 * (k_ex - (4.0 / 3.0) * s**2)
+        if nu2T <= 0.0:
+            return 1e-6, 0.0
+
+        nu_eff = np.sqrt(nu2T / T)
+        rho_eff = float(np.clip(s / (3.0 * np.sqrt(nu2T)), -0.999, 0.999))
+        return nu_eff, rho_eff
+    
     @staticmethod
     def _c_coeff(x, rho):
         if x < 1e-8:
@@ -198,3 +243,4 @@ class EuropeanAnalyticsMRSABR(EuropeanAnalyticsSABR):
         self.rho_raw = rho
         self.nu_eff, self.rho_eff = self.mr_effective_params(kappa, T, nu, rho)
         super().__init__(F_s, T, beta, self.nu_eff, self.rho_eff, sigma_atm, lambda_)
+
