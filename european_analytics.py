@@ -1,8 +1,7 @@
-from scipy.optimize import brentq
+from scipy.optimize import brentq,least_squares
 from scipy.integrate import quad
 import numpy as np
 from scipy.stats import norm
-
 
 class EuropeanAnalyticsSABR:
 
@@ -149,6 +148,23 @@ class EuropeanAnalyticsSABR:
             "ci_low":   price - 1.96 * stderr,
             "ci_high":  price + 1.96 * stderr,
         }
+
+    @staticmethod
+    def fit_effective_params(mc_vols, K_grid, F_s, T, beta, sigma_atm, lambda_,
+                            x0=(0.3, -0.2)):
+        """Recover 'true' effective (nu, rho) by least-squares fitting a standard
+        SABR smile to an MC-implied vol smile. alpha is auto-pinned to the ATM
+        target inside __init__. Returns (nu_fit, rho_fit)."""
+        mask = np.isfinite(mc_vols)
+        def resid(p):
+            nu_t, rho_t = p
+            try:
+                an = EuropeanAnalyticsSABR(F_s, T, beta, nu_t, rho_t, sigma_atm, lambda_)
+                return (an.implied_vol_smile(K_grid)[mask] - mc_vols[mask]) * 1e4
+            except Exception:
+                return np.full(mask.sum(), 1e6)
+        sol = least_squares(resid, x0=list(x0),bounds=([1e-4, -0.999], [3.0, 0.999]))
+        return sol.x
     
 class EuropeanAnalyticsMRSABR(EuropeanAnalyticsSABR):
     """Mean-reverting SABR analytics"""
@@ -156,15 +172,19 @@ class EuropeanAnalyticsMRSABR(EuropeanAnalyticsSABR):
     @staticmethod
     def mr_effective_params_mm(kappa, T, nu, rho):
         """Effective SABR parameters via MOMENT MATCHING.
-        Returns (nu_eff, rho_eff).
+        Computes the terminal skewness s and excess kurtosis k_ex of S(T) to
+        O(nu^2) for the mean-reverting vol process, then inverts them (section 2.4).
         """
         x = kappa * T
         if x < 1e-8:
-            return nu, rho
+            s    = 3.0 * rho * nu * np.sqrt(T)
+            k_ex = 4.0 * nu**2 * T * (1.0 + 3.0 * rho**2)
+            return (nu, rho, s, k_ex)
 
         # skewness of S(T)
         s = 6.0 * nu * rho * np.sqrt(T) / x**2 * (x - 1.0 + np.exp(-x))
 
+        # excess kurtosis of S(T)
         # O(nu^2) coefficient of E[S^2 sigma]/alpha^2 (minus its O(1) part t):
         def _q(t):
             e1 = np.exp(-kappa * t)
@@ -174,7 +194,6 @@ class EuropeanAnalyticsMRSABR(EuropeanAnalyticsSABR):
             q1 = 4.0 * (1.0 - e1) / kappa**2 - 4.0 * t * e1 / kappa
             return q0 + rho**2 * q1
 
-        # forcing term of the hat-R ODE:  hatR' + 2 kappa hatR = Sigma(t)
         def _Sigma(t):
             e1 = np.exp(-kappa * t)
             e2 = np.exp(-2.0 * kappa * t)
@@ -191,12 +210,12 @@ class EuropeanAnalyticsMRSABR(EuropeanAnalyticsSABR):
         k_ex = 6.0 * nu**2 / T * (I / T - p_hat_T)
 
         nu2T = 0.25 * (k_ex - (4.0 / 3.0) * s**2)
-        if nu2T <= 0.0:
-            return 1e-6, 0.0
+        if nu2T <= 0.0:                                
+            return (1e-6, 0.0, s, k_ex)
 
-        nu_eff = np.sqrt(nu2T / T)
+        nu_eff  = np.sqrt(nu2T / T)
         rho_eff = float(np.clip(s / (3.0 * np.sqrt(nu2T)), -0.999, 0.999))
-        return nu_eff, rho_eff
+        return (nu_eff, rho_eff, s, k_ex)
     
     @staticmethod
     def _c_coeff(x, rho):
